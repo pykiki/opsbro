@@ -52,7 +52,8 @@ class SystemPacketMgr(object):
                         # .strip('"') will remove if there or else do nothing
                         inf[k] = v.strip('"')
                 distname = inf['ID'].lower().strip()
-                distversion = inf['VERSION_ID'].lower().strip()
+                if 'VERSION_ID' in inf:
+                  distversion = inf['VERSION_ID'].lower().strip()
                 distid = inf['ID'].lower().strip()
             elif os.path.exists('/etc.defaults/VERSION'):  # synology linux
                 with open('/etc.defaults/VERSION') as f:
