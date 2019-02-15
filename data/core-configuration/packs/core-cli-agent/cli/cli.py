@@ -475,7 +475,8 @@ def do_stop():
 def do_keygen():
     k = uuid.uuid1().hex[:16]
     cprint('UDP Encryption key: (aka encryption_key)', end='')
-    cprint(base64.b64encode(k), color='green')
+    cprint(base64.b64encode(k.encode('utf-8')), color='green')
+
     cprint('')
     try:
         import rsa
@@ -483,7 +484,7 @@ def do_keygen():
         logger.error('Missing python-rsa module for RSA keys generation, please install it')
         return
     pubkey, privkey = rsa.newkeys(2048)
-    
+
     cprint("Private RSA key (2048). (aka master_key_priv for for file mfkey.priv)")
     s_privkey = privkey.save_pkcs1()
     cprint(s_privkey, color='green')
