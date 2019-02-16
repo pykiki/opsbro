@@ -99,27 +99,35 @@ class FailbackLevelDBBackend(object):
 
 class LevelDBBackend(object):
     name = 'leveldb'
-    
-    
+
+
     def __init__(self, path):
         self.path = path
         logger.info('Opening KV database at path %s' % path)
         self.db = leveldb_lib.LevelDB(path)
         logger.info('KV database at path %s is opened: %s' % (path, self.db))
-    
-    
+
+
     def Get(self, key, fill_cache=False):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
         return self.db.Get(key, fill_cache=fill_cache)
-    
-    
+
+
     def Put(self, key, value):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        if isinstance(value, str):
+            value = value.encode('utf-8')
         self.db.Put(key, value)
-    
-    
+
+
     def Delete(self, key):
+        if isinstance(key, str):
+            key = key.encode('utf-8')
         self.db.Delete(key)
-    
-    
+
+
     def __get_size(self):
         total_size = 0
         for dirpath, dirnames, filenames in os.walk(self.path):
@@ -128,8 +136,8 @@ class LevelDBBackend(object):
                 total_size += os.path.getsize(fp)
                 logger.info('ADD: %s %d' % (fp, os.path.getsize(fp)))
         return total_size
-    
-    
+
+
     def GetStats(self):
         return {'size': self.__get_size(), 'raw': self.db.GetStats(), 'error': ''}
     
