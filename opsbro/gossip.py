@@ -180,7 +180,6 @@ class Gossip(BaseManager):
                         continue  # you are saved
                     # you are not saved ^^
                     to_del.append(nuuid)
-                # TODO: manage multi zone layer
                 # Other zone, or unknown
                 else:
                     to_del.append(nuuid)
@@ -1509,33 +1508,43 @@ class Gossip(BaseManager):
     # but now we should give back only nodes that the other zone
     # have the right:
     # * same zone as us: give all we know about
-    # * top zone: CANNOT  be the case, because only lower zone ask upper zones
+    # * top zone: can be the case if the top try to join us, in normal cases only lower zone ask upper zones (give all)
     # * sub zones: give only our zone proxy nodes
     #   * no the other nodes of my zones, they don't have to know my zone detail
     #   * not my top zones of course, same reason, even proxy nodes, they need to talk to me only
     #   * not the other sub zones of my, because they don't have to see which who I am linked (can be an other customer for example)
+    #     * but if the sub-zone is their own, then ok give it
     def get_nodes_for_push_pull_response(self, other_node_zone):
         logger.debug('PUSH-PULL: get a push pull from a node zone: %s' % other_node_zone)
         # Same zone: give all we know about
         if other_node_zone == self.zone:
             logger.debug('PUSH-PULL same zone ask us, give back all we know about')
-            # with self.nodes_lock:
-            #    nodes = copy.copy(self.nodes)
             nodes = self.nodes
             return nodes
         
-        # Ok look if in sub zones: if found, all they need to know is
+        # Top zones can see all of us
+        top_zones = zonemgr.get_top_zones_from(self.zone)
+        if other_node_zone in top_zones:
+            nodes = self.nodes
+            return nodes
+        
+        # Ok look if in sub zones: if found, all they need to know is:
         # my realm proxy nodes
         sub_zones = zonemgr.get_sub_zones_from(self.zone)
         if other_node_zone in sub_zones:
-            only_my_zone_proxies = {}
-            # with self.nodes_lock:
+            my_zone_proxies_and_its_zone = {}
             for (nuuid, node) in self.nodes.items():
                 if node['is_proxy'] and node['zone'] == self.zone:
-                    only_my_zone_proxies[nuuid] = node
-                    logger.debug('PUSH-PULL: give back data about proxy node: %s' % node['name'])
-            return only_my_zone_proxies
+                    my_zone_proxies_and_its_zone[nuuid] = node
+                    logger.debug('PUSH-PULL: give back data about proxy node of my own zone: %s' % node['name'])
+                    continue
+                if node['zone'] == other_node_zone:
+                    my_zone_proxies_and_its_zone[nuuid] = node
+                    logger.debug('PUSH-PULL: give back data about a node of the caller zone: %s' % node['name'])
+                    continue
+            return my_zone_proxies_and_its_zone
         
+        # Other level (brother like zones)
         logger.warning('SECURITY: a node from an unallowed zone %s did ask us push_pull' % other_node_zone)
         return {}
     
