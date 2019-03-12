@@ -187,7 +187,10 @@ class ShinkenModule(ConnectorModule):
         use_value = ','.join(tpls)
         if self.monitoring_tool == 'nagios':
             use_value = 'generic-host'
-        
+
+        if not n['addr'] or n['addr'] is None:
+            n['addr'] = n['name']
+
         buf = '''# Auto generated host, do not edit
         \ndefine host{
             host_name      %s

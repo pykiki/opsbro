@@ -117,7 +117,7 @@ class InterfaceHostingDriver(object):
     def _is_valid_local_addr(self, addr):
         if not addr:
             return False
-        if addr.startswith('127.0.0.'):
+        if addr.startswith('127.0.'):
             return False
         if addr.startswith('169.254.'):
             return False

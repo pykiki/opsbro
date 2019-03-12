@@ -1024,6 +1024,8 @@ class Gossip(BaseManager):
             node = self.nodes.get(uuid, None)
             if node is None:
                 continue
+            if not node['addr']:
+                node['addr'] = node['name']
             self.__do_ping(node)
         # now reset it
         self.to_ping_back = []
@@ -1039,6 +1041,8 @@ class Gossip(BaseManager):
     # Launch a ping to another node and if fail set it as suspect
     def __do_ping(self, other):
         addr = other['addr']
+        if not addr:
+            addr = other['name']
         port = other['port']
         other_zone_name = other['zone']
         ping_zone = other_zone_name
@@ -1094,6 +1098,8 @@ class Gossip(BaseManager):
             enc_message = encrypter.encrypt(message, dest_zone_name=ping_zone)  # relays are all in the other zone, so same as before
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
             for r in relays:
+                if not r['addr']:
+                    r['addr'] = r['name']
                 try:
                     sock.sendto(enc_message, (r['addr'], r['port']))
                     logger.info('PING waiting ack message from relay %s about node %s' % (r['display_name'], other['display_name']))
@@ -1177,7 +1183,10 @@ class Gossip(BaseManager):
         if not ntgt or not nfrom:
             logger.info('PING: asking for a ping relay for a node I dont know about: about %s from %s' % (ntgt, nfrom))
             return
-        tgtaddr = ntgt['addr']
+        if not ntgt['addr']:
+            tgtaddr = ntgt['name']
+        else:
+            tgtaddr = ntgt['addr']
         tgtport = ntgt['port']
         tgt_zone = ntgt['zone']
         # Maybe the target zone is too high, if so we don't have it's key, so use our own
@@ -1362,7 +1371,10 @@ class Gossip(BaseManager):
             for b in to_del:
                 broadcaster.broadcasts.remove(b)
         
-        addr = dest['addr']
+        if not dest['addr']:
+            addr = dest['name']
+        else:
+            addr = dest['addr']
         port = dest['port']
         zone_name = dest['zone']
         # if the other node is from a higher realm, we cannot talk to it with it's own key (we don't have it)
@@ -1719,6 +1731,8 @@ class Gossip(BaseManager):
             dest_port = dest_node['port']
         else:
             dest_addr, dest_port = force_addr
+        if not dest_addr:
+            dest_addr = dest_node['name']
         dest_zone = dest_node['zone']
         # If the other is in a top level, we don't have it's zone key, use our
         if zonemgr.is_top_zone_from(self.zone, dest_zone):
