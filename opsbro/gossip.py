@@ -17,7 +17,6 @@ from .websocketmanager import websocketmgr
 from .pubsub import pubsub
 from .library import libstore
 from .httpclient import get_http_exceptions, httper
-from .zonemanager import zonemgr
 from .stop import stopper
 from .handlermgr import handlermgr
 from .topic import topiker, TOPIC_SERVICE_DISCOVERY
@@ -25,6 +24,7 @@ from .basemanager import BaseManager
 from .jsonmgr import jsoner
 from .util import get_uuid
 from .udprouter import udprouter
+from .zonemanager import zonemgr
 
 KGOSSIP = 10
 
@@ -356,7 +356,6 @@ class Gossip(BaseManager):
         group_nodes.sort()
         
         idx = bisect.bisect_right(group_nodes, hkey) - 1
-        # logger.debug("IDX %d" % idx, hkey, kv_nodes, len(kv_nodes))
         nuuid = group_nodes[idx]
         return nuuid
     
@@ -472,6 +471,8 @@ class Gossip(BaseManager):
         if self.zone == zname:
             return
         logger.info('Switching to zone: %s' % zname)
+        if not zonemgr.have_zone(zname):
+            raise ValueError('No such zone')
         self.zone = zname
         # Simple string change, we can change both write and read node
         self._set_myself_atomic_property('zone', zname)
@@ -684,6 +685,18 @@ class Gossip(BaseManager):
         self.stack_suspect_broadcast(node)
     
     
+    # Define a function that will wait 10s to let the others nodes know that we did leave
+    # and then ask for a clean stop of the daemon
+    @staticmethod
+    def _bailout_after_leave():
+        wait_time = 10
+        logger.info('Waiting out %s seconds before exiting as we are set in leave state' % wait_time)
+        time.sleep(10)
+        logger.info('Exiting from a self leave message')
+        # Will set self.interrupted = True to every thread that loop
+        stopper.do_stop('Exiting from a leave massage')
+    
+    
     # Someone ask us about a leave node, so believe it
     # Leave node are about all states, so we don't filter by current state
     # if the incarnation is ok, we believe it
@@ -737,19 +750,7 @@ class Gossip(BaseManager):
                 self._set_myself_atomic_property('state', state)
                 self.increase_incarnation_and_broadcast()
                 
-                
-                # Define a function that will wait 10s to let the others nodes know that we did leave
-                # and then ask for a clean stop of the daemon
-                def bailout_after_leave(self):
-                    wait_time = 10
-                    logger.info('Waiting out %s seconds before exiting as we are set in leave state' % wait_time)
-                    time.sleep(10)
-                    logger.info('Exiting from a self leave message')
-                    # Will set self.interrupted = True to every thread that loop
-                    stopper.do_stop('Exiting from a leave massage')
-                
-                
-                threader.create_and_launch(bailout_after_leave, args=(self,), name='Exiting agent after set to leave', part='agent')
+                threader.create_and_launch(self._bailout_after_leave, name='Exiting agent after set to leave', part='agent')
                 return
         
         logger.info('LEAVING: The node %s is leaving' % node['name'])
@@ -814,6 +815,8 @@ class Gossip(BaseManager):
     
     
     # Someone send us it's nodes, we are merging it with ours
+    # but we will drop the one we should not see (like if a top node
+    # send nodes it should not)
     def merge_nodes(self, nodes):
         for (k, node) in nodes.items():
             # Maybe it's me? bail out
@@ -821,6 +824,17 @@ class Gossip(BaseManager):
                 logger.debug('SKIPPING myself node entry in merge nodes')
                 continue
             
+            logger.info('SOMEONE GIVE A NODE: %s' % node)
+            node_zone = node.get('zone', None)
+            if node_zone is None:
+                continue
+            if node_zone != self.zone:
+                # sub zone are accepted, but top zone should be only one
+                # level high, not too much (should not have this)
+                if zonemgr.is_top_zone_from(self.zone, node_zone):
+                    if not zonemgr.is_direct_sub_zone_from(node_zone, self.zone):  # too high
+                        logger.debug('SKIPPING node because it is from a too high zone: %s' % node_zone)
+                        continue
             state = node['state']
             
             # Try to incorporate it
@@ -1011,12 +1025,6 @@ class Gossip(BaseManager):
     # but talk to us
     # also exclude leave node, because thay said they are not here anymore ^^
     def ping_another(self):
-        # Only launch one parallel ping in the same time, max2 if we have thread
-        # that mess up with this flag :)
-        # if self.ping_another_in_progress:
-        #    return
-        # self.ping_another_in_progress = True
-        
         possible_nodes = self.__get_valid_nodes_to_ping()
         
         # first previously deads
@@ -1035,7 +1043,6 @@ class Gossip(BaseManager):
             other = random.choice(possible_nodes)
             self.__do_ping(other)
             # Ok we did finish to ping another
-            # self.ping_another_in_progress = False
     
     
     # Launch a ping to another node and if fail set it as suspect
@@ -1050,7 +1057,6 @@ class Gossip(BaseManager):
         if zonemgr.is_top_zone_from(self.zone, other_zone_name):
             ping_zone = self.zone
         ping_payload = {'type': PACKET_TYPES.PING, 'seqno': 0, 'node': other['uuid'], 'from_zone': self.zone, 'from': self.uuid}
-        # print "PREPARE PING", ping_payload, other
         message = jsoner.dumps(ping_payload)
         encrypter = libstore.get_encrypter()
         enc_message = encrypter.encrypt(message, dest_zone_name=ping_zone)
@@ -1079,7 +1085,6 @@ class Gossip(BaseManager):
                 self.set_suspect(other)
         except (socket.timeout, socket.gaierror) as exp:
             logger.info("PING: error joining the other node %s:%s : %s. Switching to a indirect ping mode." % (addr, port, exp))
-            # with self.nodes_lock:
             possible_relays = [n for n in self.nodes.values() if
                                n['uuid'] != self.uuid
                                and n != other
@@ -1216,7 +1221,6 @@ class Gossip(BaseManager):
             if zonemgr.is_top_zone_from(self.zone, nfrom_zone):
                 nfrom_zone = self.zone
             enc_ret_msg = encrypter.encrypt(ret_msg, dest_zone_name=nfrom_zone)
-            # sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
             sock.sendto(enc_ret_msg, addr)
             sock.close()
         except (socket.timeout, socket.gaierror) as exp:
@@ -1237,25 +1241,48 @@ class Gossip(BaseManager):
     
     
     # A node did send us a discovery message but with the valid network key of course.
-    # If so, give back our node informations
+    # If so, give back our node informations:
+    # * if same zone or top zone: give our informations
+    # * if directly lower zone: give us only if we are a proxy
+    # * lower 2 or less zones: give nothing
     def manage_detect_ping_message(self, m, addr):
+        requestor_zone = m.get('from_zone', None)
+        if requestor_zone is None:
+            return
+        
         my_self = self._get_myself_read_only()
         my_node_data = self.create_alive_msg(my_self)
         
-        r = {'type': PACKET_TYPES.DETECT_PONG, 'node': my_node_data}
+        r = {'type': PACKET_TYPES.DETECT_PONG, 'node': my_node_data, 'from_zone': self.zone}
         ret_msg = jsoner.dumps(r)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
         encrypter = libstore.get_encrypter()
-        from_zone = m.get('from_zone', self.zone)
+        
+        answer_allowed = False
+        # Look if we should answer or not
+        if requestor_zone == self.zone:
+            answer_allowed = True
+        else:
+            if zonemgr.is_top_zone_from(self.zone, requestor_zone):
+                answer_allowed = True
+            else:  # Lower zone: only if we are a proxy and from a directly lower zone
+                if self.is_proxy:
+                    answer_allowed = zonemgr.is_direct_sub_zone_from(self.zone, requestor_zone)
+        
+        if not answer_allowed:
+            logger.info('Will not answer to node %s' % m)
+            return
+        
+        response_zone = requestor_zone
         # If the zone from the other side is too high for us, we mustch switch to our own zone
         # instead
         # if it's lower, keep the other zone, as our own won't be available for him
-        if zonemgr.is_top_zone_from(self.zone, from_zone):
-            from_zone = self.zone
-        enc_ret_msg = encrypter.encrypt(ret_msg, dest_zone_name=from_zone)
+        if zonemgr.is_top_zone_from(self.zone, requestor_zone):
+            response_zone = self.zone
+        enc_ret_msg = encrypter.encrypt(ret_msg, dest_zone_name=response_zone)
         sock.sendto(enc_ret_msg, addr)
         sock.close()
-        logger.info("Detect back: return back message (from %s)", ret_msg, m)
+        logger.info("Detect back: return back message (from %s): %s" % (ret_msg, m))
     
     
     # launch a broadcast (UDP) and wait 5s for returns, and give all answers from others daemons
@@ -1423,9 +1450,9 @@ class Gossip(BaseManager):
             logger.log('JOINING myself %s is joining %s nodes' % (self.name, other_nodes))
             nb = 0
             for other in other_nodes:
-                nb += 1
                 r = self.do_push_pull(other)
-                
+                if r:
+                    nb += 1
                 # Do not merge with more than KGOSSIP distant nodes
                 if nb > KGOSSIP:
                     continue
@@ -1504,6 +1531,10 @@ class Gossip(BaseManager):
             except ValueError as exp:
                 logger.error('ERROR CONNECTING TO %s:%s' % other, exp)
                 return False
+            # Maybe we were not autorized
+            if 'error' in back:
+                logger.error('Cannot push/pull with node %s: %s' % (addr, back['error']))
+                return False
             logger.debug('do_push_pull: get return from %s:%s' % (other[0], back))
             if 'nodes' not in back:
                 logger.error('do_push_pull: back message do not have nodes entry: %s' % back)
@@ -1521,11 +1552,12 @@ class Gossip(BaseManager):
     # have the right:
     # * same zone as us: give all we know about
     # * top zone: can be the case if the top try to join us, in normal cases only lower zone ask upper zones (give all)
-    # * sub zones: give only our zone proxy nodes
+    # * direct sub zones: give only our zone proxy nodes
     #   * no the other nodes of my zones, they don't have to know my zone detail
     #   * not my top zones of course, same reason, even proxy nodes, they need to talk to me only
     #   * not the other sub zones of my, because they don't have to see which who I am linked (can be an other customer for example)
     #     * but if the sub-zone is their own, then ok give it
+    # * too much sub zones: give nothing
     def get_nodes_for_push_pull_response(self, other_node_zone):
         logger.debug('PUSH-PULL: get a push pull from a node zone: %s' % other_node_zone)
         # Same zone: give all we know about
@@ -1536,14 +1568,19 @@ class Gossip(BaseManager):
         
         # Top zones can see all of us
         top_zones = zonemgr.get_top_zones_from(self.zone)
+        logger.debug('PUSH-PULL: MY TOP ZONE (from %s) : %s' % (self.zone, top_zones))
         if other_node_zone in top_zones:
             nodes = self.nodes
             return nodes
         
-        # Ok look if in sub zones: if found, all they need to know is:
-        # my realm proxy nodes
-        sub_zones = zonemgr.get_sub_zones_from(self.zone)
-        if other_node_zone in sub_zones:
+        # Not my zone and not a top zone, so lower zone. Must be a proxy to allow to give some infos
+        if not self.is_proxy:
+            logger.info('PUSH-PULL: another node ask us a push_pull from a not my zone or top zone: %s' % other_node_zone)
+            return None
+        
+        # But only answer if it's from a directly sub zone (low-low zone should not see us)
+        # give my zone proxy nodes
+        if zonemgr.is_direct_sub_zone_from(self.zone, other_node_zone):
             my_zone_proxies_and_its_zone = {}
             for (nuuid, node) in self.nodes.items():
                 if node['is_proxy'] and node['zone'] == self.zone:
@@ -1556,25 +1593,22 @@ class Gossip(BaseManager):
                     continue
             return my_zone_proxies_and_its_zone
         
-        # Other level (brother like zones)
+        # Other level (brother like zones or sub-sub zones)
         logger.warning('SECURITY: a node from an unallowed zone %s did ask us push_pull' % other_node_zone)
-        return {}
+        return None
     
     
     # suspect nodes are set with a suspect_time entry. If it's too old,
     # set the node as dead, and broadcast the information to everyone
     def look_at_deads(self):
         # suspect a node for 5 * log(n+1) * interval
-        # with self.nodes_lock:
         node_scale = math.ceil(math.log10(float(len(self.nodes) + 1)))
         probe_interval = 1
         suspicion_mult = 5
         suspect_timeout = suspicion_mult * node_scale * probe_interval
         leave_timeout = suspect_timeout * 30  # something like 300s
         
-        # print "SUSPECT timeout", suspect_timeout
         now = int(time.time())
-        # with self.nodes_lock:
         for node in self.nodes.values():
             # Only look at suspect nodes of course...
             if node['state'] != NODE_STATES.SUSPECT:
@@ -1652,9 +1686,6 @@ class Gossip(BaseManager):
         return r
     
     
-    # def create_new_ts_msg(self, key):
-    #     return {'type': '/ts/new', 'from': self.uuid, 'key': key}
-    
     def stack_alive_broadcast(self, node):
         msg = self.create_alive_msg(node)
         # Node messages are before all others
@@ -1673,12 +1704,6 @@ class Gossip(BaseManager):
         self.add_event(msg)
         return
     
-    
-    # def stack_new_ts_broadcast(self, key):
-    #     msg = self.create_new_ts_msg(key)
-    #     b = {'send': 0, 'msg': msg, 'groups': 'ts'}
-    #     broadcaster.append(b)
-    #     return
     
     def stack_suspect_broadcast(self, node):
         msg = self.create_suspect_msg(node)
@@ -1795,7 +1820,6 @@ class Gossip(BaseManager):
         
         @http_export('/agent/leave/:nuuid', protected=True)
         def set_node_leave(nuuid):
-            # with self.nodes_lock:
             node = self.nodes.get(nuuid, None)
             if node is None:
                 logger.error('Asking us to set as leave the node %s but we cannot find it' % (nuuid))
@@ -1807,8 +1831,6 @@ class Gossip(BaseManager):
         @http_export('/agent/members')
         def agent_members():
             response.content_type = 'application/json'
-            # with self.nodes_lock:
-            #    nodes = copy.copy(self.nodes)
             return self.nodes
         
         
@@ -1851,6 +1873,10 @@ class Gossip(BaseManager):
             # And look where does the message came from: if it's the same
             # zone: we can give all, but it it's a lower zone, only give our proxy nodes informations
             nodes = self.get_nodes_for_push_pull_response(msg['ask-from-zone'])
+            if nodes is None:
+                return jsoner.dumps({'error': 'You are not from a valid zone'})
+            
+            logger.debug('ASK from zone: %s and give: %s' % (msg['ask-from-zone'], nodes))
             with self.events_lock:
                 events = copy.deepcopy(self.events)
             m = {'type': 'push-pull-msg', 'nodes': nodes, 'events': events}
@@ -1903,6 +1929,26 @@ class Gossip(BaseManager):
             response.content_type = 'application/json'
             encrypter = libstore.get_encrypter()
             return jsoner.dumps(encrypter.load_or_reload_key_for_zone_if_need(zone_name))
+        
+        
+        @http_export('/agent/query/guess/:name_or_uuid', method='GET', protected=True)
+        def get_query_by_name(name_or_uuid):
+            response.content_type = 'application/json'
+            for node in self.nodes.values():
+                if node['uuid'] == name_or_uuid or node['name'] == name_or_uuid or node['display_name'] == name_or_uuid:
+                    return node
+            return None
+        
+        
+        @http_export('/agent/ping/:node_uuid', method='GET', protected=True)
+        def get_ping_node(node_uuid):
+            response.content_type = 'application/json'
+            node = self.get(node_uuid)
+            if node is None:
+                return {'error': 'No such node %s' % node_uuid}
+            self.__do_ping(node)
+            logger.info('NODE STATE: %s' % node['state'])
+            return {'state': node['state']}
         
         
         @http_export('/agent/event/:event_type', method='GET', protected=True)
